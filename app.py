@@ -274,51 +274,61 @@ def build_model(num_classes):
     m.compile(optimizer=Adam(1e-4), loss='sparse_categorical_crossentropy',
               metrics=['sparse_categorical_accuracy'])
     return m
- 
-# ── FIX: Robust model loader — handles Keras 2.x AND Keras 3.x saved models ──
-# Strategy:
-#   1. Try a clean load first (works when versions match perfectly)
-#   2. If that fails, patch InputLayer to strip unrecognised kwargs (Keras 2.x mismatch)
-#   3. If that also fails, raise a clear human-readable error
+
+# ── FIX: Robust model loader — 3-attempt strategy ────────────────────────────
+# Attempt 1 → clean load (perfect version match)
+# Attempt 2 → patch InputLayer config (handles missing/wrong kwargs)
+# Attempt 3 → rebuild architecture + load weights only (bypasses all config)
 @st.cache_resource
 def load_saved_model(path):
     import tensorflow as tf
     from tensorflow.keras.models import load_model
- 
+
     # ── Attempt 1: clean load ────────────────────────────────────────────────
     try:
         return load_model(path, compile=False)
     except Exception:
-        pass  # fall through to patched attempt
- 
-    # ── Attempt 2: patch InputLayer for Keras 2.x version skew ─────────────
+        pass
+
+    # ── Attempt 2: patch InputLayer config ───────────────────────────────────
     try:
         from tensorflow.keras import layers as kl
         original_from_config = kl.InputLayer.from_config
- 
+
         @classmethod
         def patched_from_config(cls, config):
             config.pop("batch_shape", None)
             config.pop("optional", None)
+            # Inject shape if missing entirely
+            if "shape" not in config:
+                config["shape"] = (IMAGE_SIZE, IMAGE_SIZE, 3)
             return original_from_config.__func__(cls, config)
- 
+
         kl.InputLayer.from_config = patched_from_config
         try:
             model = load_model(path, compile=False)
             return model
         finally:
-            # Always restore original, even if loading fails
             kl.InputLayer.from_config = original_from_config
- 
+    except Exception:
+        pass
+
+    # ── Attempt 3: rebuild architecture + load weights only ──────────────────
+    # Completely bypasses config deserialization — works regardless of how
+    # the .h5 was saved, as long as the architecture hasn't changed.
+    try:
+        model = build_model(len(CLASS_LABELS))
+        model.load_weights(path)
+        return model
     except Exception as final_err:
         raise RuntimeError(
-            f"Could not load model after two attempts.\n\n"
+            f"Could not load model after three attempts.\n\n"
             f"Root cause: {final_err}\n\n"
-            f"Your model.h5 was saved with a different TensorFlow/Keras version "
-            f"than this deployment (TF {tf.__version__}). "
-            f"Please re-save the model locally using the same TF version."
+            f"Deployment is running TF {tf.__version__}. The most reliable fix is "
+            f"to re-save your model.h5 locally using TF 2.16.1:\n"
+            f"  model.save('model.h5')"
         )
- 
+
 # ── Tabs ──────────────────────────────────────────────────────────────────────
 t1, t2, t3, t4 = st.tabs(["🔍  Detect", "🏋️  Train", "📊  Evaluate", "🖼️  Dataset"])
  
